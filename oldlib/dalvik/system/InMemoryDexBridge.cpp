@@ -133,32 +133,6 @@ static jobject openBytes(JNIEnv* env, const uint8_t* source, size_t size) {
 
 } // namespace
 
-static jclass gDexFileClass = nullptr;
-static bool InitDexFileClass(JNIEnv* env, jobject loader) {
-    jclass cl = env->FindClass("java/lang/ClassLoader");
-    if (cl == nullptr) {
-        return false;
-    }
-    jmethodID loadClass = env->GetMethodID(
-        cl,
-        "loadClass",
-        "(Ljava/lang/String;)Ljava/lang/Class;");
-
-    if (loadClass == nullptr) {
-        return false;
-    }
-    jstring name = env->NewStringUTF("oldlib.dalvik.system.DexFile");
-    jobject result = env->CallObjectMethod(loader, loadClass, name);
-    env->DeleteLocalRef(name);
-    if (env->ExceptionCheck() || result == nullptr) {
-        return false;
-    }
-
-    gDexFileClass = reinterpret_cast<jclass>(env->NewGlobalRef(result));
-    env->DeleteLocalRef(result);
-    return gDexFileClass != nullptr;
-}
-
 extern "C"
 JNIEXPORT jobject JNICALL
 Java_oldlib_dalvik_system_DexFile_createCookieWithDirectBuffer(JNIEnv* env, jclass, jobject buffer, jint start, jint end) {
