@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string>
+#include <cstring>
 #include <vector>
 #include <mutex>
 #include <unordered_map>
