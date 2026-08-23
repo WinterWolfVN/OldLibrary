@@ -25,21 +25,10 @@ std::mutex gMutex;
 std::unordered_map<uintptr_t, DexMemory> gMemory;
 
 // API-25 ART 7.x exported C++ symbol.
-// ARM64 uses size_t == unsigned long.
-static const char* kOpenMemoryArm64 = "_ZN3art7DexFile10OpenMemoryEPKhmRKNSt3__112basic_stringIcNS3_11char_traitsIcEENS3_9allocatorIcEEEEjPNS_6MemMapEPKNS_10OatDexFileEPS9_";
+static const char* kOpenMemoryArm64 = "_ZN3art7DexFile10OpenMemoryEPKhmRKNSt3__112basic_stringIcNS3_11char_traitsIcEENS3_9allocatorIcEEEEjPNS_6MemMapEPKNS_10OatDexFileEPS9";
 
-// ART's return object is std::unique_ptr<const DexFile>.
-// On arm64 its returned pointer is in x0, so the raw-pointer ABI can
-// be consumed directly here.
-using OpenMemoryArm64 = const void* (*)
-    (const uint8_t*,
-     size_t,
-     const std::string&,
-     uint32_t,
-     void*,
-     const void*,
-     std::string*);
-
+// Raw ABI declaration used by this bridge.
+using OpenMemoryArm64 = const void* (*)(const uint8_t*, size_t, const std::string&, uint32_t, void*, const void*, std::string*);
 static void throwIOException(JNIEnv* env, const char* msg) {
     jclass cls = env->FindClass("java/io/IOException");
     if (cls != nullptr) {
@@ -52,7 +41,7 @@ static jobject makeCookie(JNIEnv* env, const void* dexFile) {
     // [0] = OatFile*
     // [1...] = DexFile*
     //
-    // ART's ConvertJavaArrayToDexFiles() reads exactly this layout.
+    // ART's ConvertJavaArrayToDexFiles() reads this layout.
     jlongArray cookie = env->NewLongArray(2);
     if (cookie == nullptr) {
         return nullptr;
@@ -80,17 +69,14 @@ static const void* openMemory(const uint8_t* base, size_t size, const char* loca
         dlclose(libart);
         return nullptr;
     }
+
     OpenMemoryArm64 fn = reinterpret_cast<OpenMemoryArm64>(symbol);
     std::string error;
-    // We deliberately pass nullptr for MemMap/OatDexFile because the
-    // API-25 overload accepts an optionally-backed memory mapping.
-    //
-    // The mapping is kept separately by this bridge so the bytes remain
-    // alive for the lifetime of the DexFile.
-    DexFile* dexFile = fn(base, size, std::string(location ? location : ""), 0, nullptr, nullptr, &error);
+    const void* dexFile = fn(base, size, std::string(location ? location : ""), 0, nullptr, nullptr, &error);
     if (dexFile == nullptr) {
         LOGE("DexFile::OpenMemory failed: %s", error.c_str());
-    }    
+    }
+    dlclose(libart);
     return dexFile;
 }
 
@@ -99,13 +85,13 @@ static jobject openBytes(JNIEnv* env, const uint8_t* source, size_t size) {
         throwIOException(env, "empty dex buffer");
         return nullptr;
     }
-    if ((reinterpret_cast<uintptr_t>(source) & 3u) != 0) {
-        throwIOException(env, "DEX buffer is not 4-byte aligned");
-        return nullptr;
-    }
-
-    // Make an app-owned mapping so the source Java byte[]/ByteBuffer does
-    // not have to remain pinned after JNI returns.
+    /*
+     * mmap() returns page-aligned memory, so the resulting
+     * mapping is sufficiently aligned for the DEX header.
+     *
+     * Do not reject the Java source address here: the source
+     * address is only copied into our own mapping.
+     */
     void* mapping = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (mapping == MAP_FAILED) {
         throwIOException(env, "mmap failed");
@@ -120,23 +106,42 @@ static jobject openBytes(JNIEnv* env, const uint8_t* source, size_t size) {
     }
     jobject cookie = makeCookie(env, dexFile);
     if (cookie == nullptr) {
-        delete reinterpret_cast<DexFile*>(const_cast<void*>(dexFile));
+        /*
+         * Do NOT delete dexFile here.
+         *
+         * OpenMemory() creates/returns an ART DexFile object.
+         * The bridge only has its opaque pointer here, so
+         * reinterpret_cast + delete is invalid.
+         *
+         * The mapping is also not inserted into gMemory because
+         * cookie creation failed.
+         */
         munmap(mapping, size);
         return nullptr;
-    }    
+    }
 
     {
         std::lock_guard<std::mutex> lock(gMutex);
-        gMemory[reinterpret_cast<uintptr_t>(dexFile)] = { mapping, size };
+
+        gMemory[
+            reinterpret_cast<uintptr_t>(dexFile)
+        ] = {
+            mapping,
+            size
+        };
     }
     return cookie;
 }
 
-} // namespace
+}  // namespace
 
 extern "C"
 JNIEXPORT jobject JNICALL
 Java_oldlib_dalvik_system_DexFile_createCookieWithDirectBuffer(JNIEnv* env, jclass, jobject buffer, jint start, jint end) {
+    if (buffer == nullptr) {
+        throwIOException(env, "ByteBuffer is null");
+        return nullptr;
+    }
     uint8_t* address = static_cast<uint8_t*>(env->GetDirectBufferAddress(buffer));
     jlong capacity = env->GetDirectBufferCapacity(buffer);
     if (address == nullptr || capacity < 0) {
@@ -164,9 +169,11 @@ Java_oldlib_dalvik_system_DexFile_createCookieWithArray(JNIEnv* env, jclass, jby
     }
     const size_t size = static_cast<size_t>(end - start);
     std::vector<uint8_t> temp(size);
-    env->GetByteArrayRegion(array, start, end - start, reinterpret_cast<jbyte*>(temp.data()));
-    if (env->ExceptionCheck()) {
-        return nullptr;
+    if (size != 0) {
+        env->GetByteArrayRegion(array, start, end - start, reinterpret_cast<jbyte*>(temp.data()));
+        if (env->ExceptionCheck()) {
+            return nullptr;
+        }
     }
     return openBytes(env, temp.data(), size);
 }
