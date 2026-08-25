@@ -1,55 +1,47 @@
 #include <jni.h>
-#include <android/log.h>
 #include <dlfcn.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <string>
-#include <cstring>
+#include <memory>
 #include <vector>
 #include <mutex>
 #include <unordered_map>
-#include <sys/mman.h>
-
-#define TAG "InMemoryDexBridge"
-
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
 namespace {
 
-struct DexMemory {
-    void* address;
-    size_t size;
-};
+struct DexFile {};
+struct MemMap {};
+struct OatDexFile {};
 
+typedef std::unique_ptr<const DexFile> (*OpenMemoryFn)(const uint8_t*, size_t, const std::string&, uint32_t, MemMap*, const OatDexFile*, std::string*);
 std::mutex gMutex;
-std::unordered_map<uintptr_t, DexMemory> gMemory;
+std::unordered_map<const DexFile*, std::vector<uint8_t>> gBuffers;
 
-// API-25 ART 7.x exported C++ symbol.
-static const char* kOpenMemoryArm64 = "_ZN3art7DexFile10OpenMemoryEPKhmRKNSt3__112basic_stringIcNS3_11char_traitsIcEENS3_9allocatorIcEEEEjPNS_6MemMapEPKNS_10OatDexFileEPS9";
+OpenMemoryFn GetOpenMemory() {
+    static OpenMemoryFn fn = nullptr;
+    static bool initialized = false;
 
-// Raw ABI declaration used by this bridge.
-using OpenMemoryArm64 = const void* (*)(const uint8_t*, size_t, const std::string&, uint32_t, void*, const void*, std::string*);
-static void throwIOException(JNIEnv* env, const char* msg) {
-    jclass cls = env->FindClass("java/io/IOException");
-    if (cls != nullptr) {
-        env->ThrowNew(cls, msg);
+    if (initialized) {
+        return fn;
     }
+    initialized = true;
+    void* handle = dlopen("/system/lib/libart.so", RTLD_NOW);
+    if (handle == nullptr) {
+        return nullptr;
+    }
+    fn = reinterpret_cast<OpenMemoryFn>(dlsym(handle, "_ZN3art7DexFile10OpenMemoryEPKhjRKNSt3__112basic_stringIcNS3_11char_traitsIcEENS3_9allocatorIcEEEEjPNS_6MemMapEPKNS_10OatDexFileEPS9_"));
+    return fn;
 }
 
-static jobject makeCookie(JNIEnv* env, const void* dexFile) {
-    // API 25 cookie layout:
-    // [0] = OatFile*
-    // [1...] = DexFile*
-    //
-    // ART's ConvertJavaArrayToDexFiles() reads this layout.
+jobject CreateCookie(JNIEnv* env, const DexFile* dexFile) {
     jlongArray cookie = env->NewLongArray(2);
     if (cookie == nullptr) {
         return nullptr;
     }
     jlong values[2];
     values[0] = 0;
-    values[1] = static_cast<jlong>(
-        reinterpret_cast<uintptr_t>(dexFile));
+    values[1] = static_cast<jlong>(reinterpret_cast<uintptr_t>(dexFile));
     env->SetLongArrayRegion(cookie, 0, 2, values);
     if (env->ExceptionCheck()) {
         return nullptr;
@@ -57,123 +49,116 @@ static jobject makeCookie(JNIEnv* env, const void* dexFile) {
     return cookie;
 }
 
-static const void* openMemory(const uint8_t* base, size_t size, const char* location) {
-    void* libart = dlopen("libart.so", RTLD_NOW);
-    if (libart == nullptr) {
-        LOGE("dlopen(libart.so): %s", dlerror());
-        return nullptr;
-    }
-    void* symbol = dlsym(libart, kOpenMemoryArm64);
-    if (symbol == nullptr) {
-        LOGE("DexFile::OpenMemory symbol not found: %s", dlerror());
-        dlclose(libart);
+jobject OpenMemory(JNIEnv* env, const uint8_t* data, size_t size) {
+    OpenMemoryFn openMemory = GetOpenMemory();
+
+    if (openMemory == nullptr) {
+        jclass exceptionClass = env->FindClass("java/io/IOException");
+        if (exceptionClass != nullptr) {
+            env->ThrowNew(exceptionClass, "DexFile::OpenMemory not found");
+        }
         return nullptr;
     }
 
-    OpenMemoryArm64 fn = reinterpret_cast<OpenMemoryArm64>(symbol);
+    std::vector<uint8_t> buffer(data, data + size);
+    std::string location = "InMemoryDex";
     std::string error;
-    const void* dexFile = fn(base, size, std::string(location ? location : ""), 0, nullptr, nullptr, &error);
-    if (dexFile == nullptr) {
-        LOGE("DexFile::OpenMemory failed: %s", error.c_str());
+    uint32_t checksum = 0;
+    if (size >= 36) {
+        checksum = static_cast<uint32_t>(buffer[8] | (buffer[9] << 8) | (buffer[10] << 16) | (buffer[11] << 24));
     }
-    dlclose(libart);
-    return dexFile;
-}
+    std::unique_ptr<const DexFile> dex = openMemory(buffer.data(), buffer.size(), location, checksum, nullptr, nullptr, &error);
 
-static jobject openBytes(JNIEnv* env, const uint8_t* source, size_t size) {
-    if (size == 0) {
-        throwIOException(env, "empty dex buffer");
-        return nullptr;
-    }
-    /*
-     * mmap() returns page-aligned memory, so the resulting
-     * mapping is sufficiently aligned for the DEX header.
-     *
-     * Do not reject the Java source address here: the source
-     * address is only copied into our own mapping.
-     */
-    void* mapping = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (mapping == MAP_FAILED) {
-        throwIOException(env, "mmap failed");
-        return nullptr;
-    }
-    memcpy(mapping, source, size);
-    const void* dexFile = openMemory(static_cast<const uint8_t*>(mapping), size, "InMemoryDex");
-    if (dexFile == nullptr) {
-        munmap(mapping, size);
-        throwIOException(env, "DexFile::OpenMemory failed");
-        return nullptr;
-    }
-    jobject cookie = makeCookie(env, dexFile);
-    if (cookie == nullptr) {
-        /*
-         * Do NOT delete dexFile here.
-         *
-         * OpenMemory() creates/returns an ART DexFile object.
-         * The bridge only has its opaque pointer here, so
-         * reinterpret_cast + delete is invalid.
-         *
-         * The mapping is also not inserted into gMemory because
-         * cookie creation failed.
-         */
-        munmap(mapping, size);
+    if (!dex) {
+        jclass exceptionClass = env->FindClass("java/io/IOException");
+        if (exceptionClass != nullptr) {
+            env->ThrowNew(exceptionClass, error.empty() ? "OpenMemory failed" : error.c_str());
+        }
         return nullptr;
     }
 
+    const DexFile* dexFile = dex.release();
     {
         std::lock_guard<std::mutex> lock(gMutex);
-
-        gMemory[
-            reinterpret_cast<uintptr_t>(dexFile)
-        ] = {
-            mapping,
-            size
-        };
+        gBuffers.emplace(dexFile, std::move(buffer));
     }
-    return cookie;
+    return CreateCookie(env, dexFile);
 }
 
-}  // namespace
-
-extern "C"
-JNIEXPORT jobject JNICALL
-Java_oldlib_dalvik_system_DexFile_createCookieWithDirectBuffer(JNIEnv* env, jclass, jobject buffer, jint start, jint end) {
-    if (buffer == nullptr) {
-        throwIOException(env, "ByteBuffer is null");
-        return nullptr;
-    }
-    uint8_t* address = static_cast<uint8_t*>(env->GetDirectBufferAddress(buffer));
-    jlong capacity = env->GetDirectBufferCapacity(buffer);
-    if (address == nullptr || capacity < 0) {
-        throwIOException(env, "ByteBuffer is not a direct buffer");
-        return nullptr;
-    }
-    if (start < 0 || end < start || static_cast<jlong>(end) > capacity) {
-        throwIOException(env, "invalid ByteBuffer range");
-        return nullptr;
-    }
-    return openBytes(env, address + start, static_cast<size_t>(end - start));
-}
-
-extern "C"
-JNIEXPORT jobject JNICALL
-Java_oldlib_dalvik_system_DexFile_createCookieWithArray(JNIEnv* env, jclass, jbyteArray array, jint start, jint end) {
+jobject CreateCookieWithArray(JNIEnv* env, jclass, jbyteArray array, jint start, jint end) {
     if (array == nullptr) {
-        throwIOException(env, "byte array == null");
+        jclass exceptionClass = env->FindClass("java/lang/NullPointerException");
+        if (exceptionClass != nullptr) {
+            env->ThrowNew(exceptionClass, "buffer == null");
+        }
         return nullptr;
     }
     jsize length = env->GetArrayLength(array);
     if (start < 0 || end < start || end > length) {
-        throwIOException(env, "invalid byte array range");
+        jclass exceptionClass = env->FindClass("java/lang/IndexOutOfBoundsException");
+        if (exceptionClass != nullptr) {
+            env->ThrowNew(exceptionClass, "invalid buffer range");
+        }
         return nullptr;
     }
-    const size_t size = static_cast<size_t>(end - start);
-    std::vector<uint8_t> temp(size);
-    if (size != 0) {
-        env->GetByteArrayRegion(array, start, end - start, reinterpret_cast<jbyte*>(temp.data()));
-        if (env->ExceptionCheck()) {
-            return nullptr;
-        }
+
+    jsize size = end - start;
+    jbyte* bytes = env->GetByteArrayElements(array, nullptr);
+    if (bytes == nullptr) {
+        return nullptr;
     }
-    return openBytes(env, temp.data(), size);
+    jobject result = OpenMemory(env, reinterpret_cast<const uint8_t*>(bytes + start), static_cast<size_t>(size));
+    env->ReleaseByteArrayElements(array, bytes, JNI_ABORT);
+    return result;
+}
+
+jobject CreateCookieWithDirectBuffer(JNIEnv* env, jclass, jobject buffer, jint start, jint end) {
+    if (buffer == nullptr) {
+        jclass exceptionClass = env->FindClass("java/lang/NullPointerException");
+        if (exceptionClass != nullptr) {
+            env->ThrowNew(exceptionClass, "buffer == null");
+        }
+        return nullptr;
+    }
+    void* address = env->GetDirectBufferAddress(buffer);
+    jlong capacity = env->GetDirectBufferCapacity(buffer);
+    if (address == nullptr || capacity < 0 || start < 0 || end < start ||
+        static_cast<jlong>(end) > capacity) {
+        jclass exceptionClass = env->FindClass("java/lang/IllegalArgumentException");
+        if (exceptionClass != nullptr) {
+            env->ThrowNew(exceptionClass, "invalid direct ByteBuffer");
+        }
+        return nullptr;
+    }
+    return OpenMemory(env, static_cast<const uint8_t*>(address) + start, static_cast<size_t>(end - start));
+}
+
+const JNINativeMethod gMethods[] = {
+        {
+        "createCookieWithArray", "([BII)Ljava/lang/Object;", reinterpret_cast<void*>(CreateCookieWithArray)
+        },
+        {
+        "createCookieWithDirectBuffer", "(Ljava/nio/ByteBuffer;II)Ljava/lang/Object;", reinterpret_cast<void*>(CreateCookieWithDirectBuffer)
+        }
+};
+
+}
+
+extern "C"
+JNIEXPORT jint JNICALL
+JNI_OnLoad(JavaVM* vm, void*) {
+    JNIEnv* env = nullptr;
+    if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6
+    ) != JNI_OK) {
+        return JNI_ERR;
+    }
+
+    jclass clazz = env->FindClass("oldlib/dalvik/system/DexFile");
+    if (clazz == nullptr) {
+        return JNI_ERR;
+    }
+    if (env->RegisterNatives(clazz, gMethods, sizeof(gMethods) / sizeof(gMethods[0])) != JNI_OK) {
+        return JNI_ERR;
+    }
+    return JNI_VERSION_1_6;
 }
