@@ -34,6 +34,14 @@ OpenMemoryFn GetOpenMemory() {
     return fn;
 }
 
+jobject CreateDexFileObject(JNIEnv* env, jclass, jobject cookie) {
+    jclass dexFileClass = env->FindClass("dalvik/system/DexFile");
+    if (dexFileClass == nullptr) {
+        return nullptr;
+    }
+    return env->AllocObject(dexFileClass);
+}
+
 jobject CreateCookie(JNIEnv* env, const DexFile* dexFile) {
     jlongArray cookie = env->NewLongArray(2);
     if (cookie == nullptr) {
@@ -140,6 +148,9 @@ const JNINativeMethod gMethods[] = {
         {
         "createCookieWithDirectBuffer", "(Ljava/nio/ByteBuffer;II)Ljava/lang/Object;", reinterpret_cast<void*>(CreateCookieWithDirectBuffer)
         }
+        {
+        "createDexFileObject", "(Ljava/lang/Object;)Ldalvik/system/DexFile;", reinterpret_cast<void*>(CreateDexFileObject)
+        },
 };
 
 }
