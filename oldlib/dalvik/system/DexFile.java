@@ -26,6 +26,7 @@ public final class DexFile {
             throw new NullPointerException("cookie == null");
         }
         mCookie = cookie;
+        mDexFile = createDexFileObject(cookie);
     }
 
     public DexFile(ByteBuffer buffer)

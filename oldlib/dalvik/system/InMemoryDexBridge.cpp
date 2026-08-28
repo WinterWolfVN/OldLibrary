@@ -14,6 +14,7 @@ struct DexFile {};
 struct MemMap {};
 struct OatDexFile {};
 
+static jfieldID gDexFileCookieField = nullptr;
 typedef std::unique_ptr<const DexFile> (*OpenMemoryFn)(const uint8_t*, size_t, const std::string&, uint32_t, MemMap*, const OatDexFile*, std::string*);
 std::mutex gMutex;
 std::unordered_map<const DexFile*, std::vector<uint8_t>> gBuffers;
@@ -35,11 +36,33 @@ OpenMemoryFn GetOpenMemory() {
 }
 
 jobject CreateDexFileObject(JNIEnv* env, jclass, jobject cookie) {
+    if (cookie == nullptr) {
+        jclass npe = env->FindClass("java/lang/NullPointerException");
+        if (npe != nullptr) {
+            env->ThrowNew(npe, "cookie == null");
+        }
+        return nullptr;
+    }
     jclass dexFileClass = env->FindClass("dalvik/system/DexFile");
     if (dexFileClass == nullptr) {
         return nullptr;
     }
-    return env->AllocObject(dexFileClass);
+    if (gDexFileCookieField == nullptr) {
+        gDexFileCookieField = env->GetFieldID(dexFileClass, "mCookie", "Ljava/lang/Object;");
+        if (gDexFileCookieField == nullptr) {
+            return nullptr;
+        }
+    }
+    jobject dexFile = env->AllocObject(dexFileClass);
+    if (dexFile == nullptr) {
+        return nullptr;
+    }
+    env->SetObjectField(dexFile, gDexFileCookieField, cookie);
+    if (env->ExceptionCheck()) {
+        env->DeleteLocalRef(dexFile);
+        return nullptr;
+    }
+    return dexFile;
 }
 
 jobject CreateCookie(JNIEnv* env, const DexFile* dexFile) {
