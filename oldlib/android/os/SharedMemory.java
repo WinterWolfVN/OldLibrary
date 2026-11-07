@@ -1,4 +1,4 @@
-package oldlib.android.os;
+package android.os;
 
 import android.os.Parcel;
 import android.os.Parcelable;
@@ -40,6 +40,13 @@ public final class SharedMemory implements Parcelable, Closeable {
         }
     }
     
+    private static ByteBuffer createDirectBuffer(int length, long address, FileDescriptor fd, Runnable unmapper, boolean readOnly) throws Exception {
+        Class<?> clazz = Class.forName("java.nio.DirectByteBuffer");
+        Constructor<?> constructor = clazz.getDeclaredConstructor(int.class, long.class, FileDescriptor.class, Runnable.class, boolean.class);
+        constructor.setAccessible(true);
+        return (ByteBuffer) constructor.newInstance(length, address, fd, unmapper, readOnly);
+    }
+    
     public ByteBuffer mapReadOnly() {
         return map(PROT_READ);
     }
@@ -51,32 +58,93 @@ public final class SharedMemory implements Parcelable, Closeable {
     public ByteBuffer map(int prot) {
         return map(prot, 0, mSize);
     }
-
+    
     public ByteBuffer map(int prot, int offset, int length) {
+        if ((prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC)) != 0 || prot == 0) {
+            throw new IllegalArgumentException("Invalid protection flags");
+        }
+        if (offset < 0 || length <= 0 || offset > mSize || length > mSize - offset) {
+            throw new IllegalArgumentException("Invalid mapping range");
+        }
+        long address = 0L;
+        boolean mapped = false;
         try {
             Object os = getOs();
             Method mmap = os.getClass().getMethod("mmap", long.class, long.class, int.class, int.class, FileDescriptor.class, long.class);
-            return (ByteBuffer) mmap.invoke(os, 0L, (long) length, prot, MAP_SHARED, mFileDescriptor, (long) offset);
-        } catch (Throwable t) {
-            throw new RuntimeException(t);
+            address = (Long) mmap.invoke(os, 0L, (long) length, prot, MAP_SHARED, mFileDescriptor, (long) offset);
+            mapped = true;
+            final long mappedAddress = address;
+            final long mappedLength = length;
+            Runnable unmapper = new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        Object os = getOs();
+                        Method munmap = os.getClass().getMethod("munmap", long.class, long.class);
+                        munmap.invoke(os, mappedAddress, mappedLength);
+                    } catch (InvocationTargetException e) {
+                        throw new RuntimeException(e.getCause());
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    }
+                }
+            };
+            ByteBuffer buffer = createDirectBuffer(length, address, mFileDescriptor, unmapper, (prot & PROT_WRITE) == 0);
+            mapped = false;
+            return buffer;
+        } catch (InvocationTargetException e) {
+            if (mapped) {
+                unmapAddress(address, length);
+            }
+            throw new RuntimeException("Unable to map SharedMemory", e.getCause());
+        } catch (Exception e) {
+            if (mapped) {
+                unmapAddress(address, length);
+            }
+            throw new RuntimeException("Unable to map SharedMemory", e);
+        }
+    }
+    
+    public static void unmap(ByteBuffer buffer) {
+        if (buffer == null) {
+            throw new NullPointerException("buffer");
+        }
+        if (!buffer.isDirect()) {
+            throw new IllegalArgumentException("Buffer must be direct");
+        }
+        try {
+            Method cleanerMethod = buffer.getClass().getMethod("cleaner");
+            Object cleaner = cleanerMethod.invoke(buffer);
+            if (cleaner == null) {
+                throw new IllegalStateException("Cleaner is null");
+            }
+            Method cleanMethod = cleaner.getClass().getMethod("clean");
+            cleanMethod.invoke(cleaner);
+        } catch (InvocationTargetException e) {
+            throw new RuntimeException("Unable to unmap buffer", e.getCause());
+        } catch (Exception e) {
+            throw new RuntimeException("Unable to unmap buffer", e);
         }
     }
 
-    public static void unmap(ByteBuffer buffer) {
-        if (buffer == null || !buffer.isDirect()) return;
+    private static void unmapAddress(long address, long length) {
         try {
-            Object os = getOs();
-            Field addressField = java.nio.Buffer.class.getDeclaredField("address");
-            addressField.setAccessible(true);
-            long address = addressField.getLong(buffer);
+            Class<?> libcore = Class.forName("libcore.io.Libcore");
+            Field osField = libcore.getField("os");
+            Object os = osField.get(null);
             Method munmap = os.getClass().getMethod("munmap", long.class, long.class);
-            munmap.invoke(os, address, (long) buffer.capacity());
-        } catch (Throwable t) {
-            throw new RuntimeException(t);
+            munmap.invoke(os, address, length);
+        } catch (InvocationTargetException e) {
+            throw new RuntimeException("munmap failed", e.getCause());
+        } catch (Exception e) {
+            throw new RuntimeException("Unable to unmap memory", e);
         }
     }
 
     public void setProtect(int prot) {
+        if ((prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC)) != 0 || prot == 0) {
+            throw new IllegalArgumentException("Invalid protection flags");
+        }
         try {
             Object os = getOs();
             try {
