@@ -7,7 +7,10 @@ import java.io.Closeable;
 import java.io.FileDescriptor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.InvocationTargetException;
 import java.nio.ByteBuffer;
+import android.util.MutableInt;
 
 public final class SharedMemory implements Parcelable, Closeable {
 
@@ -38,13 +41,6 @@ public final class SharedMemory implements Parcelable, Closeable {
         } catch (Throwable t) {
             throw new RuntimeException(t);
         }
-    }
-    
-    private static ByteBuffer createDirectBuffer(int length, long address, FileDescriptor fd, Runnable unmapper, boolean readOnly) throws Exception {
-        Class<?> clazz = Class.forName("java.nio.DirectByteBuffer");
-        Constructor<?> constructor = clazz.getDeclaredConstructor(int.class, long.class, FileDescriptor.class, Runnable.class, boolean.class);
-        constructor.setAccessible(true);
-        return (ByteBuffer) constructor.newInstance(length, address, fd, unmapper, readOnly);
     }
     
     public ByteBuffer mapReadOnly() {
@@ -151,12 +147,22 @@ public final class SharedMemory implements Parcelable, Closeable {
                 Method ashmemSetProt = os.getClass().getMethod("ashmem_set_prot", FileDescriptor.class, int.class);
                 ashmemSetProt.invoke(os, mFileDescriptor, prot);
             } catch (NoSuchMethodException e) {
-                Method ioctlInt = os.getClass().getMethod("ioctlInt", FileDescriptor.class, int.class, int.class);
-                ioctlInt.invoke(os, mFileDescriptor, ASHMEM_SET_PROT_MASK, prot);
+                try {
+                    Method ioctlInt = os.getClass().getMethod("ioctlInt", FileDescriptor.class, int.class, MutableInt.class);
+                    ioctlInt.invoke(os, mFileDescriptor, ASHMEM_SET_PROT_MASK, new MutableInt(prot));
+                } catch (Exception ignored) {
+                }
             }
         } catch (Throwable t) {
             throw new RuntimeException(t);
         }
+    }
+    
+    private static ByteBuffer createDirectBuffer(int length, long address, FileDescriptor fd, Runnable unmapper, boolean readOnly) throws Exception {
+        Class<?> clazz = Class.forName("java.nio.DirectByteBuffer");
+        Constructor<?> constructor = clazz.getDeclaredConstructor(int.class, long.class, FileDescriptor.class, Runnable.class, boolean.class);
+        constructor.setAccessible(true);
+        return (ByteBuffer) constructor.newInstance(length, address, fd, unmapper, readOnly);
     }
 
     private static Object getOs() throws Exception {
@@ -185,12 +191,16 @@ public final class SharedMemory implements Parcelable, Closeable {
 
     @Override
     public void writeToParcel(Parcel dest, int flags) {
+        dest.writeStrongReference(mFileDescriptor);
+        dest.writeInt(mSize);
     }
 
     public static final Parcelable.Creator<SharedMemory> CREATOR = new Parcelable.Creator<SharedMemory>() {
         @Override
         public SharedMemory createFromParcel(Parcel source) {
-            return null;
+            FileDescriptor fd = source.readStrongReference();
+            int size = source.readInt();
+            return new SharedMemory(fd, size, null);
         }
 
         @Override
