@@ -2,7 +2,7 @@ package oldlib.dalvik.system;
 
 import java.nio.ByteBuffer;
 
-public final class InMemoryDexClassLoader extends InMemoryDexClsCore {
+public final class InMemoryDexClassLoader extends InMemoryDexLoaderCore {
 
     public InMemoryDexClassLoader(ByteBuffer dexBuffer, ClassLoader parent) {
         this(new Object[]{dexBuffer}, null, parent, true);
@@ -11,3 +11,4 @@ public final class InMemoryDexClassLoader extends InMemoryDexClsCore {
     public InMemoryDexClassLoader(ByteBuffer[] dexBuffers, ClassLoader parent) {
         this(dexBuffers, null, parent, true);
     }
+} 
