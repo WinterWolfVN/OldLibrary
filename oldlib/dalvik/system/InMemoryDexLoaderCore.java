@@ -13,6 +13,7 @@ import java.nio.ByteOrder;
 import java.util.Arrays;
 import dalvik.system.BaseDexClassLoader;
 
+// Support Android 5-7.1
 public class InMemoryDexLoaderCore extends BaseDexClassLoader {
     private static final int MAP_ANONYMOUS = 0x20;
     private static final FileDescriptor noFd = new FileDescriptor();
@@ -61,7 +62,6 @@ public class InMemoryDexLoaderCore extends BaseDexClassLoader {
                 if (dex != null) break;
             }
             Object rawCookie = getField(dex.getClass(), dex, "mCookie");
-
             long tplPtr;
             if (Build.VERSION.SDK_INT == 21) {
                 ByteBuffer tmp = ByteBuffer.wrap(templateBytes).order(ByteOrder.nativeOrder());
@@ -157,7 +157,6 @@ public class InMemoryDexLoaderCore extends BaseDexClassLoader {
         putPtr(s, pointerSize, begin);
         putPtr(s, 2 * pointerSize, size);
         s.putInt(headerOffset - 2 * pointerSize, dex.getInt(8));
-
         putPtr(s, headerOffset, begin);
         putPtr(s, headerOffset + 1 * pointerSize, begin + (dex.getInt(60) & 0xFFFFFFFFL));
         putPtr(s, headerOffset + 2 * pointerSize, begin + (dex.getInt(68) & 0xFFFFFFFFL));
@@ -165,7 +164,6 @@ public class InMemoryDexLoaderCore extends BaseDexClassLoader {
         putPtr(s, headerOffset + 4 * pointerSize, begin + (dex.getInt(92) & 0xFFFFFFFFL));
         putPtr(s, headerOffset + 5 * pointerSize, begin + (dex.getInt(76) & 0xFFFFFFFFL));
         putPtr(s, headerOffset + 6 * pointerSize, begin + (dex.getInt(100) & 0xFFFFFFFFL));
-
         pokeByteArrayMethod.invoke(null, structPtr, sBytes, 0, 256);
         pokeByteArrayMethod.invoke(null, begin, dexBytes, 0, size);
         return structPtr;

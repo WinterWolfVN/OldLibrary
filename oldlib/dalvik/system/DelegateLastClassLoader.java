@@ -10,9 +10,9 @@ import java.util.Enumeration;
 import java.util.List;
 import dalvik.system.PathClassLoader;
 
+// Support Android 5-7.1
 public final class DelegateLastClassLoader extends PathClassLoader {
-    private static final ClassLoader BOOT_LOADER = Object.class.getClassLoader();
-
+    private static final ClassLoader BootLoader = Object.class.getClassLoader();
     private final boolean mDelegateResourceLoading;
     private final InMemoryDexClassLoader mRamLoader;
 
@@ -33,13 +33,13 @@ public final class DelegateLastClassLoader extends PathClassLoader {
     public DelegateLastClassLoader(ByteBuffer dexBuffer, ClassLoader parent) {
         super(File.pathSeparator, null, parent);
         this.mDelegateResourceLoading = false;
-        this.mRamLoader = new InMemoryDexClassLoader(dexBuffer, BOOT_LOADER);
+        this.mRamLoader = new InMemoryDexClassLoader(dexBuffer, BootLoader);
     }
 
     public DelegateLastClassLoader(ByteBuffer[] dexBuffers, ClassLoader parent) {
         super(File.pathSeparator, null, parent);
         this.mDelegateResourceLoading = false;
-        this.mRamLoader = new InMemoryDexClassLoader(dexBuffers, BOOT_LOADER);
+        this.mRamLoader = new InMemoryDexClassLoader(dexBuffers, BootLoader);
     }
 
     @Override
@@ -57,7 +57,7 @@ public final class DelegateLastClassLoader extends PathClassLoader {
             return cl;
         }
         try {
-            return BOOT_LOADER.loadClass(name);
+            return BootLoader.loadClass(name);
         } catch (ClassNotFoundException ignored) {}
         ClassNotFoundException fromSuper = null;
         try {
@@ -78,7 +78,7 @@ public final class DelegateLastClassLoader extends PathClassLoader {
 
     @Override
     public URL getResource(String name) {
-        URL resource = BOOT_LOADER.getResource(name);
+        URL resource = BootLoader.getResource(name);
         if (resource != null) return resource;
         resource = findResource(name);
         if (resource != null) return resource;
@@ -92,7 +92,7 @@ public final class DelegateLastClassLoader extends PathClassLoader {
     @Override
     public Enumeration<URL> getResources(String name) throws IOException {
         List<URL> resources = new ArrayList<>();
-        addResources(resources, BOOT_LOADER.getResources(name));
+        addResources(resources, BootLoader.getResources(name));
         addResources(resources, findResources(name));
         if (mDelegateResourceLoading && getParent() != null) {
             addResources(resources, getParent().getResources(name));
