@@ -1,7 +1,8 @@
-package android.os;
+package oldlib.android.os;
 
 import android.os.Parcel;
 import android.os.Parcelable;
+import android.os.ParcelFileDescriptor; 
 import android.os.MemoryFile;
 import java.io.Closeable;
 import java.io.FileDescriptor;
@@ -12,13 +13,14 @@ import java.lang.reflect.InvocationTargetException;
 import java.nio.ByteBuffer;
 import android.util.MutableInt;
 
+// Supports Android 5-8
 public final class SharedMemory implements Parcelable, Closeable {
 
     public static final int PROT_READ = 1;
     public static final int PROT_WRITE = 2;
     public static final int PROT_EXEC = 4;
     private static final int MAP_SHARED = 1;
-    private static final int ASHMEM_SET_PROT_MASK = 0x40047708;
+    private int mProtMask = PROT_READ | PROT_WRITE | PROT_EXEC;
 
     private final FileDescriptor mFileDescriptor;
     private final int mSize;
@@ -61,6 +63,9 @@ public final class SharedMemory implements Parcelable, Closeable {
         }
         if (offset < 0 || length <= 0 || offset > mSize || length > mSize - offset) {
             throw new IllegalArgumentException("Invalid mapping range");
+        }
+        if ((prot & ~mProtMask) != 0) {
+            throw new ErrnoException("mmap", OsConstants.EACCES);
         }
         long address = 0L;
         boolean mapped = false;
@@ -141,21 +146,10 @@ public final class SharedMemory implements Parcelable, Closeable {
         if ((prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC)) != 0 || prot == 0) {
             throw new IllegalArgumentException("Invalid protection flags");
         }
-        try {
-            Object os = getOs();
-            try {
-                Method ashmemSetProt = os.getClass().getMethod("ashmem_set_prot", FileDescriptor.class, int.class);
-                ashmemSetProt.invoke(os, mFileDescriptor, prot);
-            } catch (NoSuchMethodException e) {
-                try {
-                    Method ioctlInt = os.getClass().getMethod("ioctlInt", FileDescriptor.class, int.class, MutableInt.class);
-                    ioctlInt.invoke(os, mFileDescriptor, ASHMEM_SET_PROT_MASK, new MutableInt(prot));
-                } catch (Exception ignored) {
-                }
-            }
-        } catch (Throwable t) {
-            throw new RuntimeException(t);
+        if ((mProtMask & prot) != prot) {
+            throw new SecurityException("Cannot add protection flags");
         }
+        mProtMask = prot;
     }
     
     private static ByteBuffer createDirectBuffer(int length, long address, FileDescriptor fd, Runnable unmapper, boolean readOnly) throws Exception {
@@ -188,24 +182,37 @@ public final class SharedMemory implements Parcelable, Closeable {
     public int describeContents() {
         return 1;
     }
+    
+   @Override
+   public void writeToParcel(Parcel dest, int flags) {
+       try {
+           java.lang.reflect.Method m = Parcel.class.getMethod("writeRawFileDescriptor", FileDescriptor.class);
+           m.invoke(dest, mFileDescriptor);
+           dest.writeInt(mSize);
+           dest.writeInt(mProtMask);
+       } catch (Exception e) {
+           throw new RuntimeException("Cannot parcel SharedMemory fd", e);
+       }
+   }
 
-    @Override
-    public void writeToParcel(Parcel dest, int flags) {
-        dest.writeStrongReference(mFileDescriptor);
-        dest.writeInt(mSize);
-    }
+   public static final Parcelable.Creator<SharedMemory> CREATOR = new Parcelable.Creator<SharedMemory>() {
+       @Override
+       public SharedMemory createFromParcel(Parcel source) {
+           FileDescriptor fd;
+           try {
+               java.lang.reflect.Method m = Parcel.class.getMethod("readRawFileDescriptor");
+               fd = (FileDescriptor) m.invoke(source);
+           } catch (Exception e) {
+               throw new RuntimeException("Cannot unparcel SharedMemory fd", e);
+           }
+           int size = source.readInt();
+           int mProtMask = source.readInt();
+           return new SharedMemory(fd, size, null);
+       }
 
-    public static final Parcelable.Creator<SharedMemory> CREATOR = new Parcelable.Creator<SharedMemory>() {
-        @Override
-        public SharedMemory createFromParcel(Parcel source) {
-            FileDescriptor fd = source.readStrongReference();
-            int size = source.readInt();
-            return new SharedMemory(fd, size, null);
-        }
-
-        @Override
-        public SharedMemory[] newArray(int size) {
-            return new SharedMemory[size];
-        }
-    };
+       @Override
+       public SharedMemory[] newArray(int size) {
+           return new SharedMemory[size];
+       }
+   };
 } 
